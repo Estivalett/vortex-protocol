@@ -1,0 +1,611 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Vortex Protocol — DApp</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.7.0/ethers.umd.min.js"></script>
+<style>
+  :root {
+    --bg:       #0a0b0f;
+    --card:     #12141a;
+    --border:   #1e2130;
+    --accent:   #6c63ff;
+    --accent2:  #00d4aa;
+    --text:     #e8eaf0;
+    --muted:    #6b7280;
+    --danger:   #ef4444;
+    --success:  #22c55e;
+    --warning:  #f59e0b;
+    --radius:   12px;
+    --font:     'Inter', system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: var(--font); min-height: 100vh; }
+
+  /* NAV */
+  nav {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 18px 40px; border-bottom: 1px solid var(--border);
+    background: rgba(10,11,15,0.95); backdrop-filter: blur(12px);
+    position: sticky; top: 0; z-index: 100;
+  }
+  .logo { display: flex; align-items: center; gap: 10px; font-size: 20px; font-weight: 700; letter-spacing: -0.5px; }
+  .logo span { color: var(--accent); }
+  .nav-right { display: flex; align-items: center; gap: 16px; }
+  .chain-badge {
+    background: rgba(108,99,255,0.15); border: 1px solid rgba(108,99,255,0.4);
+    color: var(--accent); padding: 6px 14px; border-radius: 20px; font-size: 13px; font-weight: 600;
+  }
+  #connectBtn {
+    background: var(--accent); color: #fff; border: none; padding: 10px 22px;
+    border-radius: 10px; font-size: 14px; font-weight: 600; cursor: pointer; transition: 0.2s;
+  }
+  #connectBtn:hover { background: #5a52e0; }
+  #connectBtn.connected {
+    background: rgba(34,197,94,0.15); border: 1px solid rgba(34,197,94,0.4);
+    color: var(--success);
+  }
+
+  /* LAYOUT */
+  main { max-width: 1100px; margin: 0 auto; padding: 40px 20px; }
+
+  /* STATS BAR */
+  .stats-bar {
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 40px;
+  }
+  .stat-card {
+    background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 20px 24px;
+  }
+  .stat-label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; }
+  .stat-value { font-size: 24px; font-weight: 700; }
+  .stat-value.green { color: var(--success); }
+  .stat-value.purple { color: var(--accent); }
+  .stat-value.teal { color: var(--accent2); }
+
+  /* GRID */
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+
+  /* CARD */
+  .card {
+    background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 28px;
+  }
+  .card-title {
+    font-size: 16px; font-weight: 600; margin-bottom: 24px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .card-title .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
+
+  /* FORM */
+  .field { margin-bottom: 18px; }
+  label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 6px; font-weight: 500; }
+  input, select {
+    width: 100%; background: var(--bg); border: 1px solid var(--border); color: var(--text);
+    padding: 12px 16px; border-radius: 8px; font-size: 14px; outline: none; transition: 0.2s;
+  }
+  input:focus, select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(108,99,255,0.15); }
+  select option { background: var(--card); }
+
+  .input-row { display: flex; gap: 10px; }
+  .input-row input { flex: 1; }
+  .max-btn {
+    background: rgba(108,99,255,0.2); border: 1px solid rgba(108,99,255,0.4);
+    color: var(--accent); padding: 0 14px; border-radius: 8px; font-size: 12px;
+    font-weight: 600; cursor: pointer; white-space: nowrap; transition: 0.15s;
+  }
+  .max-btn:hover { background: rgba(108,99,255,0.35); }
+
+  .fee-row {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 10px 14px; background: rgba(108,99,255,0.07); border-radius: 8px;
+    font-size: 13px; margin-bottom: 18px;
+  }
+  .fee-row span:last-child { color: var(--accent); font-weight: 600; }
+
+  .submit-btn {
+    width: 100%; padding: 14px; background: linear-gradient(135deg, var(--accent), #8b5cf6);
+    color: #fff; border: none; border-radius: 10px; font-size: 15px; font-weight: 600;
+    cursor: pointer; transition: 0.2s; letter-spacing: 0.3px;
+  }
+  .submit-btn:hover { opacity: 0.9; transform: translateY(-1px); }
+  .submit-btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+
+  /* STATUS MESSAGE */
+  #statusMsg {
+    margin-top: 16px; padding: 12px 16px; border-radius: 8px;
+    font-size: 13px; display: none;
+  }
+  #statusMsg.ok  { background: rgba(34,197,94,0.12); border: 1px solid rgba(34,197,94,0.3); color: var(--success); }
+  #statusMsg.err { background: rgba(239,68,68,0.12); border: 1px solid rgba(239,68,68,0.3); color: var(--danger); }
+  #statusMsg.info { background: rgba(108,99,255,0.12); border: 1px solid rgba(108,99,255,0.3); color: var(--accent); }
+
+  /* INTENTS LIST */
+  #intentsList { display: flex; flex-direction: column; gap: 12px; margin-top: 4px; }
+  .intent-item {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 16px;
+    transition: 0.15s;
+  }
+  .intent-item:hover { border-color: rgba(108,99,255,0.4); }
+  .intent-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+  .intent-hash { font-size: 12px; color: var(--muted); font-family: monospace; }
+  .badge {
+    font-size: 11px; font-weight: 700; padding: 3px 10px; border-radius: 20px; text-transform: uppercase;
+  }
+  .badge.pending  { background: rgba(245,158,11,0.15); color: var(--warning); border: 1px solid rgba(245,158,11,0.3); }
+  .badge.filled   { background: rgba(34,197,94,0.15);  color: var(--success); border: 1px solid rgba(34,197,94,0.3); }
+  .badge.cancelled { background: rgba(107,114,128,0.15); color: var(--muted); border: 1px solid rgba(107,114,128,0.3); }
+  .badge.expired  { background: rgba(239,68,68,0.1);   color: var(--danger); border: 1px solid rgba(239,68,68,0.2); }
+
+  .intent-amounts { display: flex; align-items: center; gap: 12px; font-size: 14px; font-weight: 600; margin-bottom: 8px; }
+  .intent-amounts .arrow { color: var(--muted); font-size: 16px; }
+  .intent-meta { display: flex; gap: 16px; font-size: 12px; color: var(--muted); }
+  .cancel-btn {
+    margin-top: 10px; background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.3);
+    color: var(--danger); padding: 6px 14px; border-radius: 6px; font-size: 12px;
+    font-weight: 600; cursor: pointer; transition: 0.15s;
+  }
+  .cancel-btn:hover { background: rgba(239,68,68,0.2); }
+
+  .empty-state { text-align: center; color: var(--muted); padding: 40px 0; font-size: 14px; }
+  .empty-icon { font-size: 32px; margin-bottom: 8px; }
+
+  /* FULL WIDTH SECTION */
+  .full-card { grid-column: 1 / -1; }
+
+  /* LOADING SPINNER */
+  .spinner {
+    display: inline-block; width: 14px; height: 14px;
+    border: 2px solid rgba(255,255,255,0.3); border-top-color: #fff;
+    border-radius: 50%; animation: spin 0.7s linear infinite; margin-right: 8px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* WALLET INFO */
+  .wallet-info {
+    background: rgba(108,99,255,0.08); border: 1px solid rgba(108,99,255,0.2);
+    border-radius: 10px; padding: 14px 18px; margin-bottom: 24px;
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .wallet-addr { font-family: monospace; font-size: 13px; }
+  .wallet-bal  { font-size: 13px; color: var(--accent2); font-weight: 600; }
+
+  /* RESPONSIVE */
+  @media (max-width: 768px) {
+    .grid { grid-template-columns: 1fr; }
+    .stats-bar { grid-template-columns: repeat(2, 1fr); }
+    nav { padding: 14px 20px; }
+    main { padding: 24px 16px; }
+    .full-card { grid-column: 1; }
+  }
+
+  /* GLOW EFFECT ON CARD */
+  .card.glow { box-shadow: 0 0 40px rgba(108,99,255,0.08); }
+</style>
+</head>
+<body>
+
+<!-- NAV -->
+<nav>
+  <div class="logo">⚡ <span>Vortex</span> Protocol</div>
+  <div class="nav-right">
+    <div class="chain-badge" id="chainBadge">— Network</div>
+    <button id="connectBtn" onclick="connectWallet()">Connect Wallet</button>
+  </div>
+</nav>
+
+<!-- MAIN -->
+<main>
+
+  <!-- WALLET INFO (hidden until connected) -->
+  <div class="wallet-info" id="walletInfo" style="display:none">
+    <div>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:4px;">CONNECTED WALLET</div>
+      <div class="wallet-addr" id="walletAddr">—</div>
+    </div>
+    <div style="text-align:right">
+      <div style="font-size:11px;color:var(--muted);margin-bottom:4px;">VTX BALANCE</div>
+      <div class="wallet-bal" id="vtxBalance">— VTX</div>
+    </div>
+  </div>
+
+  <!-- STATS -->
+  <div class="stats-bar">
+    <div class="stat-card">
+      <div class="stat-label">Protocol Fee</div>
+      <div class="stat-value purple">0.05%</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Staker Reward</div>
+      <div class="stat-value green">70% of fees</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Min Solver Stake</div>
+      <div class="stat-value teal">10,000 VTX</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Total Supply</div>
+      <div class="stat-value purple">1B VTX</div>
+    </div>
+  </div>
+
+  <!-- GRID -->
+  <div class="grid">
+
+    <!-- SUBMIT INTENT -->
+    <div class="card glow">
+      <div class="card-title"><div class="dot"></div> Submit Intent</div>
+
+      <div class="field">
+        <label>Input Token Address</label>
+        <input id="inputToken" type="text" placeholder="0x... (token you're giving)"/>
+      </div>
+
+      <div class="field">
+        <label>Output Token Address</label>
+        <input id="outputToken" type="text" placeholder="0x... (token you want)"/>
+      </div>
+
+      <div class="field">
+        <label>Input Amount</label>
+        <div class="input-row">
+          <input id="inputAmount" type="number" placeholder="100.0" min="0" step="any"/>
+          <button class="max-btn" onclick="setMax()">MAX</button>
+        </div>
+      </div>
+
+      <div class="field">
+        <label>Minimum Output (slippage floor)</label>
+        <input id="minOutput" type="number" placeholder="99.0" min="0" step="any"/>
+      </div>
+
+      <div class="field">
+        <label>Deadline</label>
+        <select id="deadlineSelect">
+          <option value="300">5 minutes</option>
+          <option value="1800">30 minutes</option>
+          <option value="3600" selected>1 hour</option>
+          <option value="14400">4 hours</option>
+          <option value="86400">24 hours</option>
+          <option value="604800">7 days (max)</option>
+        </select>
+      </div>
+
+      <div class="fee-row">
+        <span>Protocol Fee (0.05%)</span>
+        <span id="feeDisplay">—</span>
+      </div>
+
+      <button class="submit-btn" id="submitBtn" onclick="submitIntent()" disabled>
+        Connect wallet to submit
+      </button>
+
+      <div id="statusMsg"></div>
+    </div>
+
+    <!-- MY INTENTS -->
+    <div class="card" style="overflow-y:auto;max-height:620px">
+      <div class="card-title" style="justify-content:space-between">
+        <span style="display:flex;align-items:center;gap:8px"><div class="dot" style="background:var(--accent2)"></div> My Intents</span>
+        <button onclick="loadMyIntents()" style="background:none;border:1px solid var(--border);color:var(--muted);padding:5px 12px;border-radius:6px;font-size:12px;cursor:pointer">↻ Refresh</button>
+      </div>
+      <div id="intentsList">
+        <div class="empty-state"><div class="empty-icon">📋</div>Connect wallet to see your intents</div>
+      </div>
+    </div>
+
+  </div>
+</main>
+
+<script>
+// ─────────────────────────────────────────────────────────────────────────────
+// CONTRACT CONFIG — update these after each deploy
+// ─────────────────────────────────────────────────────────────────────────────
+const CONTRACTS = {
+  31337: { // Hardhat local
+    router:  "0x5FC8d32690cc91D4c39d9d3abcBD16989F875707",
+    vtx:     "0x5FbDB2315678afecb367f032d93F642f64180aa3",
+    staking: "0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9",
+  },
+  84532: { // Base Sepolia — fill after testnet deploy
+    router:  "",
+    vtx:     "",
+    staking: "",
+  },
+};
+
+const ROUTER_ABI = [
+  "function submitIntent(address inputToken, address outputToken, uint256 inputAmount, uint256 minOutput, uint256 sourceChain, uint256 destChain, uint256 deadline, bytes calldata signature) returns (bytes32)",
+  "function cancelIntent(bytes32 intentHash) nonpayable",
+  "function getIntent(bytes32 intentHash) view returns (tuple(address user,address solver,address inputToken,address outputToken,uint256 inputAmount,uint256 minOutput,uint256 sourceChain,uint256 destChain,uint256 deadline,uint256 nonce,uint8 status))",
+  "function getUserNonce(address user) view returns (uint256)",
+  "function computeFee(uint256 inputAmount) pure returns (uint256)",
+  "function domainSeparator() view returns (bytes32)",
+  "function INTENT_TYPEHASH() view returns (bytes32)",
+  "event IntentCreated(bytes32 indexed intentHash, address indexed user, address inputToken, address outputToken, uint256 inputAmount, uint256 minOutput, uint256 sourceChain, uint256 destChain, uint256 deadline, uint256 nonce)",
+];
+
+const ERC20_ABI = [
+  "function balanceOf(address) view returns (uint256)",
+  "function allowance(address,address) view returns (uint256)",
+  "function approve(address,uint256) returns (bool)",
+  "function decimals() view returns (uint8)",
+  "function symbol() view returns (string)",
+];
+
+const STATUS_LABELS = ["PENDING","FILLED","CANCELLED","EXPIRED"];
+const STATUS_CLASS  = ["pending","filled","cancelled","expired"];
+
+// ─────────────────────────────────────────────────────────────────────────────
+// State
+// ─────────────────────────────────────────────────────────────────────────────
+let provider, signer, chainId, routerContract, vtxContract;
+let myIntentHashes = JSON.parse(localStorage.getItem("vortex_intents") || "[]");
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Wallet connection
+// ─────────────────────────────────────────────────────────────────────────────
+async function connectWallet() {
+  if (!window.ethereum) {
+    alert("MetaMask not found. Install it at metamask.io");
+    return;
+  }
+  try {
+    const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
+    provider = new ethers.BrowserProvider(window.ethereum);
+    signer   = await provider.getSigner();
+    chainId  = Number((await provider.getNetwork()).chainId);
+
+    const addr  = accounts[0];
+    const short = addr.slice(0,6) + "..." + addr.slice(-4);
+
+    document.getElementById("connectBtn").textContent  = short;
+    document.getElementById("connectBtn").classList.add("connected");
+    document.getElementById("chainBadge").textContent  = chainId === 31337 ? "Hardhat" : chainId === 84532 ? "Base Sepolia" : `Chain ${chainId}`;
+    document.getElementById("walletInfo").style.display = "flex";
+    document.getElementById("walletAddr").textContent  = addr;
+    document.getElementById("submitBtn").disabled      = false;
+    document.getElementById("submitBtn").textContent   = "Sign & Submit Intent";
+
+    const addrs = CONTRACTS[chainId];
+    if (addrs?.vtx) {
+      vtxContract    = new ethers.Contract(addrs.vtx,    ERC20_ABI,  signer);
+      routerContract = new ethers.Contract(addrs.router, ROUTER_ABI, signer);
+      const bal = await vtxContract.balanceOf(addr);
+      document.getElementById("vtxBalance").textContent = parseFloat(ethers.formatEther(bal)).toLocaleString() + " VTX";
+    }
+
+    await loadMyIntents();
+
+    // Listen for account/chain changes
+    window.ethereum.on("accountsChanged", () => location.reload());
+    window.ethereum.on("chainChanged",    () => location.reload());
+
+  } catch (e) {
+    showStatus("err", "Connection failed: " + e.message);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Submit Intent
+// ─────────────────────────────────────────────────────────────────────────────
+async function submitIntent() {
+  if (!signer) { showStatus("err", "Connect wallet first"); return; }
+
+  const inputTokenAddr  = document.getElementById("inputToken").value.trim();
+  const outputTokenAddr = document.getElementById("outputToken").value.trim();
+  const inputAmtStr     = document.getElementById("inputAmount").value;
+  const minOutStr       = document.getElementById("minOutput").value;
+  const deadlineSec     = parseInt(document.getElementById("deadlineSelect").value);
+
+  if (!ethers.isAddress(inputTokenAddr))  { showStatus("err","Invalid input token address"); return; }
+  if (!ethers.isAddress(outputTokenAddr)) { showStatus("err","Invalid output token address"); return; }
+  if (!inputAmtStr || parseFloat(inputAmtStr) <= 0) { showStatus("err","Enter a valid input amount"); return; }
+  if (!minOutStr   || parseFloat(minOutStr)   <= 0) { showStatus("err","Enter a valid minimum output"); return; }
+
+  const addrs = CONTRACTS[chainId];
+  if (!addrs?.router) { showStatus("err","No contract deployment found for this network"); return; }
+
+  const btn = document.getElementById("submitBtn");
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>Processing...';
+
+  try {
+    const inputToken  = new ethers.Contract(inputTokenAddr,  ERC20_ABI, signer);
+    const decimalsIn  = await inputToken.decimals();
+    const inputAmount = ethers.parseUnits(inputAmtStr, decimalsIn);
+    const minOutput   = ethers.parseUnits(minOutStr, decimalsIn);
+    const deadline    = BigInt(Math.floor(Date.now()/1000) + deadlineSec);
+    const nonce       = await routerContract.getUserNonce(signer.address);
+
+    // Approve router to spend inputToken
+    showStatus("info", "Checking allowance...");
+    const allowance = await inputToken.allowance(signer.address, addrs.router);
+    if (allowance < inputAmount) {
+      showStatus("info", "Approving tokens... (confirm in MetaMask)");
+      const approveTx = await inputToken.approve(addrs.router, ethers.MaxUint256);
+      await approveTx.wait();
+    }
+
+    // Build EIP-712 signature
+    showStatus("info", "Sign the intent in MetaMask...");
+    const domain = {
+      name: "VortexRouter",
+      version: "1",
+      chainId: chainId,
+      verifyingContract: addrs.router,
+    };
+    const types = {
+      Intent: [
+        { name: "user",         type: "address" },
+        { name: "inputToken",   type: "address" },
+        { name: "outputToken",  type: "address" },
+        { name: "inputAmount",  type: "uint256" },
+        { name: "minOutput",    type: "uint256" },
+        { name: "sourceChain",  type: "uint256" },
+        { name: "destChain",    type: "uint256" },
+        { name: "deadline",     type: "uint256" },
+        { name: "nonce",        type: "uint256" },
+      ]
+    };
+    const value = {
+      user:        signer.address,
+      inputToken:  inputTokenAddr,
+      outputToken: outputTokenAddr,
+      inputAmount: inputAmount,
+      minOutput:   minOutput,
+      sourceChain: BigInt(chainId),
+      destChain:   BigInt(chainId),
+      deadline:    deadline,
+      nonce:       nonce,
+    };
+
+    const signature = await signer.signTypedData(domain, types, value);
+
+    showStatus("info", "Submitting intent on-chain...");
+    const tx = await routerContract.submitIntent(
+      inputTokenAddr, outputTokenAddr,
+      inputAmount, minOutput,
+      BigInt(chainId), BigInt(chainId),
+      deadline, signature
+    );
+
+    showStatus("info", "Waiting for confirmation...");
+    const receipt = await tx.wait();
+
+    // Extract intentHash from event
+    const iface = routerContract.interface;
+    let intentHash = null;
+    for (const log of receipt.logs) {
+      try {
+        const parsed = iface.parseLog(log);
+        if (parsed?.name === "IntentCreated") {
+          intentHash = parsed.args.intentHash;
+          break;
+        }
+      } catch {}
+    }
+
+    if (intentHash) {
+      myIntentHashes.unshift(intentHash);
+      localStorage.setItem("vortex_intents", JSON.stringify(myIntentHashes.slice(0, 50)));
+    }
+
+    showStatus("ok", `✅ Intent submitted! Tx: ${receipt.hash.slice(0,10)}...`);
+    await loadMyIntents();
+
+  } catch (e) {
+    showStatus("err", e.reason || e.message?.slice(0,120) || "Transaction failed");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Sign & Submit Intent";
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Load & display user's intents
+// ─────────────────────────────────────────────────────────────────────────────
+async function loadMyIntents() {
+  const list = document.getElementById("intentsList");
+  if (!routerContract || myIntentHashes.length === 0) {
+    list.innerHTML = '<div class="empty-state"><div class="empty-icon">📋</div>No intents yet. Submit your first one!</div>';
+    return;
+  }
+
+  list.innerHTML = '<div style="color:var(--muted);font-size:13px;padding:8px">Loading...</div>';
+
+  try {
+    const items = [];
+    for (const hash of myIntentHashes.slice(0, 20)) {
+      try {
+        const intent = await routerContract.getIntent(hash);
+        items.push({ hash, intent });
+      } catch {}
+    }
+
+    if (items.length === 0) {
+      list.innerHTML = '<div class="empty-state"><div class="empty-icon">📋</div>No intents found on this network</div>';
+      return;
+    }
+
+    list.innerHTML = items.map(({ hash, intent }) => {
+      const status  = Number(intent.status);
+      const inAmt   = parseFloat(ethers.formatEther(intent.inputAmount)).toFixed(4);
+      const minOut  = parseFloat(ethers.formatEther(intent.minOutput)).toFixed(4);
+      const expires = new Date(Number(intent.deadline) * 1000).toLocaleTimeString();
+      const shortIn = intent.inputToken.slice(0,6)  + "..." + intent.inputToken.slice(-4);
+      const shortOut= intent.outputToken.slice(0,6) + "..." + intent.outputToken.slice(-4);
+      const isPending = status === 0;
+
+      return `
+        <div class="intent-item">
+          <div class="intent-top">
+            <div class="intent-hash">${hash.slice(0,14)}...</div>
+            <div class="badge ${STATUS_CLASS[status]}">${STATUS_LABELS[status]}</div>
+          </div>
+          <div class="intent-amounts">
+            <span style="color:var(--danger)">${inAmt} <span style="color:var(--muted);font-size:11px">${shortIn}</span></span>
+            <span class="arrow">→</span>
+            <span style="color:var(--success)">≥${minOut} <span style="color:var(--muted);font-size:11px">${shortOut}</span></span>
+          </div>
+          <div class="intent-meta">
+            <span>Expires: ${expires}</span>
+            <span>Nonce: ${intent.nonce.toString()}</span>
+          </div>
+          ${isPending ? `<button class="cancel-btn" onclick="cancelIntent('${hash}')">Cancel & Refund</button>` : ""}
+        </div>`;
+    }).join("");
+
+  } catch (e) {
+    list.innerHTML = `<div class="empty-state">Error loading intents: ${e.message?.slice(0,80)}</div>`;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Cancel Intent
+// ─────────────────────────────────────────────────────────────────────────────
+async function cancelIntent(hash) {
+  if (!routerContract) return;
+  try {
+    showStatus("info", "Cancelling intent...");
+    const tx = await routerContract.cancelIntent(hash);
+    await tx.wait();
+    showStatus("ok", "Intent cancelled. Tokens refunded.");
+    await loadMyIntents();
+  } catch (e) {
+    showStatus("err", e.reason || e.message?.slice(0,100));
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────────────────────
+function showStatus(type, msg) {
+  const el = document.getElementById("statusMsg");
+  el.textContent = msg;
+  el.className   = type;
+  el.style.display = "block";
+}
+
+function setMax() {
+  // Placeholder — sets a demo amount
+  document.getElementById("inputAmount").value = "100";
+  document.getElementById("minOutput").value   = "99.5";
+  updateFeeDisplay();
+}
+
+function updateFeeDisplay() {
+  const amt = parseFloat(document.getElementById("inputAmount").value);
+  if (isNaN(amt) || amt <= 0) {
+    document.getElementById("feeDisplay").textContent = "—";
+    return;
+  }
+  const fee = amt * 0.0005;
+  document.getElementById("feeDisplay").textContent = fee.toFixed(6) + " tokens";
+}
+
+document.getElementById("inputAmount").addEventListener("input", updateFeeDisplay);
+</script>
+</body>
+</html>

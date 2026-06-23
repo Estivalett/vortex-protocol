@@ -16,7 +16,9 @@
     "node": "hardhat node",
     "clean": "hardhat clean",
     "size": "hardhat size-contracts",
-    "gas": "REPORT_GAS=true hardhat test"
+    "gas": "REPORT_GAS=true hardhat test",
+    "solver": "node scripts/solver.js",
+    "solver:base-sepolia": "RPC_URL=$BASE_SEPOLIA_RPC_URL node scripts/solver.js"
   },
   "dependencies": {
     "@openzeppelin/contracts": "^5.1.0"
