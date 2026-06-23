@@ -10,7 +10,7 @@ import "./TraverseIntent.sol";
 
 interface ITraverseStaking {
     function isSolver(address solver) external view returns (bool);
-    function distributeRevenue(uint256 amount) external;
+    function distributeRevenue(address token, uint256 amount) external;
 }
 
 /**
@@ -258,15 +258,25 @@ contract TraverseRouter is TraverseIntent, ReentrancyGuard, Ownable2Step {
         require(signer == msg.sender, "TraverseRouter: invalid signature");
         require(intents[intentHash].user == address(0), "TraverseRouter: intent exists");
 
-        // ── Effects ──────────────────────────────────────────────────────────
+        // ── Effects (replay protection before any external call) ─────────────
         nonces[msg.sender] = currentNonce + 1;
 
+        // ── Interactions ─────────────────────────────────────────────────────
+        // FIX TRV-12: measure the amount actually received so fee-on-transfer /
+        // deflationary tokens cannot leave the contract under-funded relative to the
+        // accounted inputAmount. The stored inputAmount is the real received balance.
+        uint256 balBefore = IERC20(inputToken).balanceOf(address(this));
+        IERC20(inputToken).safeTransferFrom(msg.sender, address(this), inputAmount);
+        uint256 received = IERC20(inputToken).balanceOf(address(this)) - balBefore;
+        require(received >= MIN_INPUT_AMOUNT, "TraverseRouter: received below minimum");
+
+        // ── Effects ──────────────────────────────────────────────────────────
         intents[intentHash] = Intent({
             user:        msg.sender,
             solver:      address(0),
             inputToken:  inputToken,
             outputToken: outputToken,
-            inputAmount: inputAmount,
+            inputAmount: received,
             minOutput:   minOutput,
             sourceChain: sourceChain,
             destChain:   destChain,
@@ -280,16 +290,13 @@ contract TraverseRouter is TraverseIntent, ReentrancyGuard, Ownable2Step {
             msg.sender,
             inputToken,
             outputToken,
-            inputAmount,
+            received,
             minOutput,
             sourceChain,
             destChain,
             deadline,
             currentNonce
         );
-
-        // ── Interactions ─────────────────────────────────────────────────────
-        IERC20(inputToken).safeTransferFrom(msg.sender, address(this), inputAmount);
     }
 
     /**
@@ -346,7 +353,7 @@ contract TraverseRouter is TraverseIntent, ReentrancyGuard, Ownable2Step {
 
         // 4. Forward staking portion to staking contract, then notify
         IERC20(intent.inputToken).safeTransfer(address(staking), stakingPortion);
-        staking.distributeRevenue(stakingPortion);
+        staking.distributeRevenue(intent.inputToken, stakingPortion);
     }
 
     /**

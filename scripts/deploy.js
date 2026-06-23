@@ -114,10 +114,9 @@ async function main() {
   await tx.wait();
   console.log("   Staking.setRouter() done");
 
-  // Staking distributes rewards in the same token the Router sends fees in
-  // (each ERC-20 inputToken). For a single-token reward model, set as needed.
-  // Example: set rewardToken to address(0) for ETH rewards, or to a specific ERC-20.
-  // tx = await staking.setRewardToken(someRewardTokenAddress);
+  // Rewards are distributed automatically in whatever ERC-20 the Router forwards
+  // (each intent's inputToken). No reward-token configuration is required — the
+  // Staking contract tracks a per-token accumulator and pays each token on claim.
 
   // ─────────────────────────────────────────────────────────────────────────
   // 8. Transfer Ownership → Timelock

@@ -13,11 +13,23 @@ import "@openzeppelin/contracts/access/Ownable2Step.sol";
  *         minimum stake requirement. Registered solvers can be slashed by governance
  *         for malicious behaviour.
  *
- * Revenue accounting uses a reward-per-share accumulator pattern so that rewards can
- * be distributed in O(1) regardless of the number of stakers.
+ * Revenue accounting uses a PER-TOKEN reward-per-share accumulator so that rewards
+ * can be distributed in O(1) per token, regardless of the number of stakers.
  *
  * Unstaking is subject to a 7-day cooldown to protect the protocol from stake-withdrawal
- * attacks immediately before a slash event.
+ * attacks immediately before a slash event. Crucially, queued (cooling-down) stake
+ * remains slashable for the entire cooldown window.
+ *
+ * Security fixes applied in this revision:
+ *   - TRV-09 (CRITICAL): rewards are now accrued and paid in the SAME ERC-20 token that
+ *     the Router forwards (the intent's inputToken). The previous single-`rewardToken`
+ *     design accrued value in the fee token but paid out in an unrelated token, which
+ *     either locked rewards forever (default ETH) or drained staked principal (TRV).
+ *   - TRV-10 (CRITICAL): slashing can no longer be bypassed. `slash()` no longer requires
+ *     `isSolver` and reaches funds queued for withdrawal, so deregistering or unstaking
+ *     just before a slash no longer protects a malicious solver.
+ *   - TRV-11 (MEDIUM): fees forwarded while `totalStaked == 0` are no longer orphaned;
+ *     they are carried in `undistributed[token]` and folded into the next distribution.
  */
 contract TraverseStaking is ReentrancyGuard, Ownable2Step {
     using SafeERC20 for IERC20;
@@ -35,8 +47,9 @@ contract TraverseStaking is ReentrancyGuard, Ownable2Step {
     /// @notice Precision multiplier for reward-per-share arithmetic.
     uint256 private constant PRECISION = 1e18;
 
-    /// @notice Delay required before a proposed rewardToken change takes effect.
-    uint256 public constant REWARD_TOKEN_CHANGE_DELAY = 2 days;
+    /// @notice Upper bound on the number of distinct reward tokens, to bound the gas
+    ///         cost of per-token settlement loops.
+    uint256 public constant MAX_REWARD_TOKENS = 32;
 
     // ─────────────────────────────────────────────────────────────────────────
     // State
@@ -48,34 +61,36 @@ contract TraverseStaking is ReentrancyGuard, Ownable2Step {
     /// @notice Address authorised to call distributeRevenue() (the Router).
     address public router;
 
-    /// @notice Accumulated reward per staked TRV unit (scaled by PRECISION).
-    uint256 public rewardPerShareAccumulated;
-
-    /// @notice Total TRV currently staked across all users.
+    /// @notice Total TRV currently staked across all users (excludes cooling-down stake).
     uint256 public totalStaked;
+
+    /// @notice List of every ERC-20 that has ever been distributed as a reward.
+    address[] public rewardTokens;
+
+    /// @notice Whether a token is already tracked in `rewardTokens`.
+    mapping(address => bool) public isRewardToken;
+
+    /// @notice Accumulated reward-per-staked-TRV-unit for each reward token (scaled by PRECISION).
+    mapping(address => uint256) public rewardPerShareAccumulated;
+
+    /// @notice Rewards forwarded while there were no stakers, carried into the next distribution.
+    mapping(address => uint256) public undistributed;
 
     // Per-staker accounting
     struct StakeInfo {
-        uint256 staked;               // TRV currently staked
-        uint256 rewardDebt;           // reward-per-share snapshot at last update
-        uint256 pendingRewards;       // unclaimed rewards accumulated so far
+        uint256 staked;               // TRV currently staked (earning rewards)
         bool    isSolver;             // registered as active solver
-        uint256 unstakeAmount;        // amount queued for withdrawal
+        uint256 unstakeAmount;        // amount queued for withdrawal (still slashable)
         uint256 unstakeAvailableAt;   // timestamp when cooldown ends
     }
 
     mapping(address => StakeInfo) public stakers;
 
-    // Revenue token(s) distributed to stakers (protocol fees arrive as native ETH
-    // or ERC-20 depending on the chain; we support any ERC-20 reward token here).
-    // For simplicity, rewards are tracked in a single reward token set by the owner.
-    address public rewardToken; // address(0) = native ETH
+    /// @notice Per (user, rewardToken) reward-per-share snapshot at last settlement.
+    mapping(address => mapping(address => uint256)) public rewardDebt;
 
-    /// @notice Pending reward token waiting for the 2-day delay to expire.
-    address public pendingRewardToken;
-
-    /// @notice Timestamp after which pendingRewardToken can be applied.
-    uint256 public rewardTokenChangeAvailableAt;
+    /// @notice Per (user, rewardToken) unclaimed rewards accumulated so far.
+    mapping(address => mapping(address => uint256)) public pendingRewardsOf;
 
     // ─────────────────────────────────────────────────────────────────────────
     // Events
@@ -87,11 +102,10 @@ contract TraverseStaking is ReentrancyGuard, Ownable2Step {
     event SolverRegistered(address indexed solver);
     event SolverDeregistered(address indexed solver);
     event SolverSlashed(address indexed solver, uint256 slashedAmount, address recipient);
-    event RewardsClaimed(address indexed user, uint256 amount);
-    event RevenueDistributed(uint256 amount);
+    event RewardsClaimed(address indexed user, address indexed token, uint256 amount);
+    event RevenueDistributed(address indexed token, uint256 amount);
     event RouterSet(address indexed router);
-    event RewardTokenChangeProposed(address indexed token, uint256 availableAt);
-    event RewardTokenSet(address indexed token);
+    event RewardTokenAdded(address indexed token);
 
     // ─────────────────────────────────────────────────────────────────────────
     // Modifiers
@@ -107,12 +121,12 @@ contract TraverseStaking is ReentrancyGuard, Ownable2Step {
     // ─────────────────────────────────────────────────────────────────────────
 
     /**
-     * @param _vtx   Address of the TRV token contract.
+     * @param _trv   Address of the TRV token contract.
      * @param _owner Initial owner (will be transferred to Timelock post-deploy).
      */
-    constructor(address _vtx, address _owner) Ownable(_owner) {
-        require(_vtx != address(0), "TraverseStaking: zero trv");
-        trv = IERC20(_vtx);
+    constructor(address _trv, address _owner) Ownable(_owner) {
+        require(_trv != address(0), "TraverseStaking: zero trv");
+        trv = IERC20(_trv);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -127,30 +141,6 @@ contract TraverseStaking is ReentrancyGuard, Ownable2Step {
         require(_router != address(0), "TraverseStaking: zero router");
         router = _router;
         emit RouterSet(_router);
-    }
-
-    /**
-     * @notice Proposes a new reward token. Takes effect after REWARD_TOKEN_CHANGE_DELAY (2 days).
-     * @dev    FIX TRV-05: Two-step delayed change prevents mid-stream reward token swaps that
-     *         would break pending reward accounting for existing stakers.
-     * @param _newRewardToken ERC-20 contract address, or address(0) for native ETH.
-     */
-    function proposeRewardTokenChange(address _newRewardToken) external onlyOwner {
-        pendingRewardToken        = _newRewardToken;
-        rewardTokenChangeAvailableAt = block.timestamp + REWARD_TOKEN_CHANGE_DELAY;
-        emit RewardTokenChangeProposed(_newRewardToken, rewardTokenChangeAvailableAt);
-    }
-
-    /**
-     * @notice Applies the pending reward token change after the 2-day delay has elapsed.
-     */
-    function applyRewardTokenChange() external onlyOwner {
-        require(rewardTokenChangeAvailableAt != 0, "TraverseStaking: no change pending");
-        require(block.timestamp >= rewardTokenChangeAvailableAt, "TraverseStaking: delay active");
-        rewardToken               = pendingRewardToken;
-        pendingRewardToken        = address(0);
-        rewardTokenChangeAvailableAt = 0;
-        emit RewardTokenSet(rewardToken);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -175,17 +165,15 @@ contract TraverseStaking is ReentrancyGuard, Ownable2Step {
 
     /**
      * @notice Queues `amount` TRV for withdrawal after the 7-day cooldown.
-     * @dev    Reduces the active stake immediately; tokens are locked until cooldown.
-     *         If the user is a solver and remaining stake falls below the minimum,
-     *         solver status is revoked automatically.
+     * @dev    Reduces the active (reward-earning) stake immediately; tokens are locked
+     *         until cooldown AND remain slashable during the cooldown window.
+     *         TRV-03: a new unstake cannot be queued until the previous one is withdrawn.
      * @param amount Amount of TRV to unstake.
      */
     function unstake(uint256 amount) external nonReentrant {
         StakeInfo storage info = stakers[msg.sender];
         require(amount > 0,              "TraverseStaking: zero amount");
         require(info.staked >= amount,   "TraverseStaking: insufficient stake");
-        // FIX TRV-03: Prevent cooldown reset. Require existing queued withdrawal to be
-        // claimed before queuing a new one, so earlier amounts are never delayed further.
         require(info.unstakeAmount == 0, "TraverseStaking: withdraw queued amount first");
 
         _settleRewards(msg.sender);
@@ -199,7 +187,7 @@ contract TraverseStaking is ReentrancyGuard, Ownable2Step {
             emit SolverDeregistered(msg.sender);
         }
 
-        // Queue cooldown withdrawal
+        // Queue cooldown withdrawal (still slashable)
         info.unstakeAmount      = amount;
         info.unstakeAvailableAt = block.timestamp + UNSTAKE_COOLDOWN;
 
@@ -228,8 +216,6 @@ contract TraverseStaking is ReentrancyGuard, Ownable2Step {
 
     /**
      * @notice Registers the caller as an active solver after staking the required amount.
-     * @dev    The caller must already have at least SOLVER_MIN_STAKE TRV staked.
-     *         Additional TRV can be staked in the same call by passing a non-zero `extraStake`.
      * @param extraStake Additional TRV to stake on top of the existing balance (may be 0).
      */
     function registerAsSolver(uint256 extraStake) external nonReentrant {
@@ -253,6 +239,7 @@ contract TraverseStaking is ReentrancyGuard, Ownable2Step {
 
     /**
      * @notice Voluntarily deregisters the caller as a solver.
+     * @dev    Deregistering does NOT exempt staked or cooling-down funds from slashing.
      */
     function deregisterAsSolver() external {
         require(stakers[msg.sender].isSolver, "TraverseStaking: not a solver");
@@ -262,7 +249,6 @@ contract TraverseStaking is ReentrancyGuard, Ownable2Step {
 
     /**
      * @notice Returns whether `solver` is currently registered as an active solver.
-     * @param solver Address to check.
      */
     function isSolver(address solver) external view returns (bool) {
         return stakers[solver].isSolver;
@@ -273,24 +259,41 @@ contract TraverseStaking is ReentrancyGuard, Ownable2Step {
     // ─────────────────────────────────────────────────────────────────────────
 
     /**
-     * @notice Slashes a misbehaving solver's stake.
-     * @dev    Only callable by the owner (Timelock / governance).
+     * @notice Slashes a misbehaving solver's stake, including funds in the unstake cooldown.
+     * @dev    TRV-10: No `isSolver` gate and reaches `unstakeAmount`, so a solver cannot
+     *         dodge a slash by deregistering or unstaking. Active stake is consumed first,
+     *         then cooling-down stake. Only callable by the owner (Timelock / governance).
      * @param solver    Address of the solver to slash.
-     * @param amount    Amount of staked TRV to seize.
+     * @param amount    Amount of TRV to seize (from active + cooling-down stake).
      * @param recipient Address that receives the slashed TRV (e.g., insurance fund).
      */
     function slash(address solver, uint256 amount, address recipient) external onlyOwner {
-        StakeInfo storage info = stakers[solver];
-        require(info.isSolver, "TraverseStaking: not a solver");
-        require(info.staked >= amount, "TraverseStaking: slash exceeds stake");
         require(recipient != address(0), "TraverseStaking: zero recipient");
+        require(amount > 0,              "TraverseStaking: zero amount");
+
+        StakeInfo storage info = stakers[solver];
+        uint256 slashable = info.staked + info.unstakeAmount;
+        require(slashable >= amount, "TraverseStaking: slash exceeds total stake");
 
         _settleRewards(solver);
 
-        info.staked -= amount;
-        totalStaked -= amount;
+        // Consume active (reward-earning) stake first.
+        uint256 fromActive = amount <= info.staked ? amount : info.staked;
+        if (fromActive > 0) {
+            info.staked -= fromActive;
+            totalStaked -= fromActive;
+        }
 
-        if (info.staked < SOLVER_MIN_STAKE) {
+        // Then consume cooling-down stake (not part of totalStaked).
+        uint256 remaining = amount - fromActive;
+        if (remaining > 0) {
+            info.unstakeAmount -= remaining;
+            if (info.unstakeAmount == 0) {
+                info.unstakeAvailableAt = 0;
+            }
+        }
+
+        if (info.isSolver && info.staked < SOLVER_MIN_STAKE) {
             info.isSolver = false;
             emit SolverDeregistered(solver);
         }
@@ -304,46 +307,76 @@ contract TraverseStaking is ReentrancyGuard, Ownable2Step {
     // ─────────────────────────────────────────────────────────────────────────
 
     /**
-     * @notice Distributes protocol revenue to stakers by advancing the reward-per-share
-     *         accumulator. Called exclusively by TraverseRouter when fees are collected.
-     * @dev    FIX TRV-01: The Router already applies STAKING_SHARE_BPS (70%) before
-     *         transferring `amount` here. We must NOT apply any share factor again —
-     *         doing so would cause double-reduction and permanently lock the remainder.
-     *         `amount` is forwarded in full to the reward accumulator.
-     * @param amount The staker portion of the fee (already 70% of gross fee, sent by Router).
+     * @notice Distributes protocol revenue (in `token`) to stakers by advancing the
+     *         per-token reward-per-share accumulator. Called exclusively by the Router.
+     * @dev    TRV-01: the Router already applies STAKING_SHARE_BPS (70%) before forwarding,
+     *         so `amount` is distributed in full.
+     *         TRV-09: rewards accrue in the exact token forwarded and are later paid in
+     *         that same token — no cross-token mismatch.
+     *         TRV-11: if there are no stakers yet, the amount is carried in `undistributed`
+     *         and folded into the next distribution instead of being orphaned.
+     * @param token  ERC-20 fee token forwarded by the Router (the intent's inputToken).
+     * @param amount The staker portion of the fee (already 70% of gross fee).
      */
-    function distributeRevenue(uint256 amount) external onlyRouter {
-        if (totalStaked == 0 || amount == 0) return;
+    function distributeRevenue(address token, uint256 amount) external onlyRouter {
+        require(token != address(0), "TraverseStaking: zero token");
+        if (amount == 0) return;
 
-        // amount is already the correct staker portion — distribute 100% of it.
-        rewardPerShareAccumulated += (amount * PRECISION) / totalStaked;
+        if (!isRewardToken[token]) {
+            require(rewardTokens.length < MAX_REWARD_TOKENS, "TraverseStaking: too many reward tokens");
+            isRewardToken[token] = true;
+            rewardTokens.push(token);
+            emit RewardTokenAdded(token);
+        }
 
-        emit RevenueDistributed(amount);
+        if (totalStaked == 0) {
+            undistributed[token] += amount;
+            return;
+        }
+
+        uint256 total = amount + undistributed[token];
+        undistributed[token] = 0;
+
+        rewardPerShareAccumulated[token] += (total * PRECISION) / totalStaked;
+        emit RevenueDistributed(token, total);
     }
 
     /**
-     * @notice Claims all accrued rewards for the caller.
+     * @notice Claims all accrued rewards (across every reward token) for the caller.
      */
     function claimRewards() external nonReentrant {
         _settleRewards(msg.sender);
 
-        uint256 pending = stakers[msg.sender].pendingRewards;
-        require(pending > 0, "TraverseStaking: no rewards");
-
-        stakers[msg.sender].pendingRewards = 0;
-
-        _transferReward(msg.sender, pending);
-        emit RewardsClaimed(msg.sender, pending);
+        uint256 len = rewardTokens.length;
+        uint256 claimedAny;
+        for (uint256 i = 0; i < len; i++) {
+            address token = rewardTokens[i];
+            uint256 pending = pendingRewardsOf[msg.sender][token];
+            if (pending > 0) {
+                pendingRewardsOf[msg.sender][token] = 0;
+                claimedAny += pending;
+                IERC20(token).safeTransfer(msg.sender, pending);
+                emit RewardsClaimed(msg.sender, token, pending);
+            }
+        }
+        require(claimedAny > 0, "TraverseStaking: no rewards");
     }
 
     /**
-     * @notice Returns the unclaimed reward balance for `user`.
-     * @param user Address to query.
+     * @notice Returns the unclaimed reward balance of `user` for a specific `token`.
      */
-    function pendingRewards(address user) external view returns (uint256) {
+    function pendingRewards(address user, address token) external view returns (uint256) {
         StakeInfo storage info = stakers[user];
-        uint256 unsettled = (info.staked * (rewardPerShareAccumulated - info.rewardDebt)) / PRECISION;
-        return info.pendingRewards + unsettled;
+        uint256 unsettled = (info.staked *
+            (rewardPerShareAccumulated[token] - rewardDebt[user][token])) / PRECISION;
+        return pendingRewardsOf[user][token] + unsettled;
+    }
+
+    /**
+     * @notice Returns the full list of reward tokens ever distributed.
+     */
+    function getRewardTokens() external view returns (address[] memory) {
+        return rewardTokens;
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -351,29 +384,21 @@ contract TraverseStaking is ReentrancyGuard, Ownable2Step {
     // ─────────────────────────────────────────────────────────────────────────
 
     /**
-     * @dev Snaps pending rewards for `user` into pendingRewards and updates rewardDebt.
+     * @dev Snaps pending rewards for `user` across all reward tokens and updates debts.
      */
     function _settleRewards(address user) internal {
-        StakeInfo storage info = stakers[user];
-        if (info.staked > 0) {
-            uint256 earned = (info.staked * (rewardPerShareAccumulated - info.rewardDebt)) / PRECISION;
-            info.pendingRewards += earned;
-        }
-        info.rewardDebt = rewardPerShareAccumulated;
-    }
-
-    /**
-     * @dev Transfers `amount` of rewardToken (or ETH) to `recipient`.
-     */
-    function _transferReward(address recipient, uint256 amount) internal {
-        if (rewardToken == address(0)) {
-            (bool ok, ) = payable(recipient).call{value: amount}("");
-            require(ok, "TraverseStaking: ETH transfer failed");
-        } else {
-            IERC20(rewardToken).safeTransfer(recipient, amount);
+        uint256 staked = stakers[user].staked;
+        uint256 len = rewardTokens.length;
+        for (uint256 i = 0; i < len; i++) {
+            address token = rewardTokens[i];
+            uint256 acc = rewardPerShareAccumulated[token];
+            if (staked > 0) {
+                uint256 earned = (staked * (acc - rewardDebt[user][token])) / PRECISION;
+                if (earned > 0) {
+                    pendingRewardsOf[user][token] += earned;
+                }
+            }
+            rewardDebt[user][token] = acc;
         }
     }
-
-    /// @notice Accept ETH rewards from Router when rewardToken == address(0).
-    receive() external payable {}
 }
