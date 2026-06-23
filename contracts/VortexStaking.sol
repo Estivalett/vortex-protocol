@@ -32,11 +32,11 @@ contract VortexStaking is ReentrancyGuard, Ownable2Step {
     /// @notice Cooldown period before an unstake request can be withdrawn.
     uint256 public constant UNSTAKE_COOLDOWN = 7 days;
 
-    /// @notice Staker share of total protocol revenue (70 / 100).
-    uint256 public constant STAKER_SHARE_BPS = 7_000; // basis points out of 10_000
-
     /// @notice Precision multiplier for reward-per-share arithmetic.
     uint256 private constant PRECISION = 1e18;
+
+    /// @notice Delay required before a proposed rewardToken change takes effect.
+    uint256 public constant REWARD_TOKEN_CHANGE_DELAY = 2 days;
 
     // ─────────────────────────────────────────────────────────────────────────
     // State
@@ -71,6 +71,12 @@ contract VortexStaking is ReentrancyGuard, Ownable2Step {
     // For simplicity, rewards are tracked in a single reward token set by the owner.
     address public rewardToken; // address(0) = native ETH
 
+    /// @notice Pending reward token waiting for the 2-day delay to expire.
+    address public pendingRewardToken;
+
+    /// @notice Timestamp after which pendingRewardToken can be applied.
+    uint256 public rewardTokenChangeAvailableAt;
+
     // ─────────────────────────────────────────────────────────────────────────
     // Events
     // ─────────────────────────────────────────────────────────────────────────
@@ -84,6 +90,7 @@ contract VortexStaking is ReentrancyGuard, Ownable2Step {
     event RewardsClaimed(address indexed user, uint256 amount);
     event RevenueDistributed(uint256 amount);
     event RouterSet(address indexed router);
+    event RewardTokenChangeProposed(address indexed token, uint256 availableAt);
     event RewardTokenSet(address indexed token);
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -123,12 +130,27 @@ contract VortexStaking is ReentrancyGuard, Ownable2Step {
     }
 
     /**
-     * @notice Sets the ERC-20 token used as reward currency, or address(0) for ETH.
-     * @param _rewardToken ERC-20 contract address, or address(0) for native ETH.
+     * @notice Proposes a new reward token. Takes effect after REWARD_TOKEN_CHANGE_DELAY (2 days).
+     * @dev    FIX VTX-05: Two-step delayed change prevents mid-stream reward token swaps that
+     *         would break pending reward accounting for existing stakers.
+     * @param _newRewardToken ERC-20 contract address, or address(0) for native ETH.
      */
-    function setRewardToken(address _rewardToken) external onlyOwner {
-        rewardToken = _rewardToken;
-        emit RewardTokenSet(_rewardToken);
+    function proposeRewardTokenChange(address _newRewardToken) external onlyOwner {
+        pendingRewardToken        = _newRewardToken;
+        rewardTokenChangeAvailableAt = block.timestamp + REWARD_TOKEN_CHANGE_DELAY;
+        emit RewardTokenChangeProposed(_newRewardToken, rewardTokenChangeAvailableAt);
+    }
+
+    /**
+     * @notice Applies the pending reward token change after the 2-day delay has elapsed.
+     */
+    function applyRewardTokenChange() external onlyOwner {
+        require(rewardTokenChangeAvailableAt != 0, "VortexStaking: no change pending");
+        require(block.timestamp >= rewardTokenChangeAvailableAt, "VortexStaking: delay active");
+        rewardToken               = pendingRewardToken;
+        pendingRewardToken        = address(0);
+        rewardTokenChangeAvailableAt = 0;
+        emit RewardTokenSet(rewardToken);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -160,8 +182,11 @@ contract VortexStaking is ReentrancyGuard, Ownable2Step {
      */
     function unstake(uint256 amount) external nonReentrant {
         StakeInfo storage info = stakers[msg.sender];
-        require(amount > 0, "VortexStaking: zero amount");
-        require(info.staked >= amount, "VortexStaking: insufficient stake");
+        require(amount > 0,              "VortexStaking: zero amount");
+        require(info.staked >= amount,   "VortexStaking: insufficient stake");
+        // FIX VTX-03: Prevent cooldown reset. Require existing queued withdrawal to be
+        // claimed before queuing a new one, so earlier amounts are never delayed further.
+        require(info.unstakeAmount == 0, "VortexStaking: withdraw queued amount first");
 
         _settleRewards(msg.sender);
 
@@ -174,8 +199,8 @@ contract VortexStaking is ReentrancyGuard, Ownable2Step {
             emit SolverDeregistered(msg.sender);
         }
 
-        // Queue the cooldown withdrawal (merge any existing queue)
-        info.unstakeAmount += amount;
+        // Queue cooldown withdrawal
+        info.unstakeAmount      = amount;
         info.unstakeAvailableAt = block.timestamp + UNSTAKE_COOLDOWN;
 
         emit UnstakeQueued(msg.sender, amount, info.unstakeAvailableAt);
@@ -281,17 +306,19 @@ contract VortexStaking is ReentrancyGuard, Ownable2Step {
     /**
      * @notice Distributes protocol revenue to stakers by advancing the reward-per-share
      *         accumulator. Called exclusively by VortexRouter when fees are collected.
-     * @dev    `amount` of rewardToken must already have been transferred to this contract
-     *         by the Router before this function is called.
-     * @param amount The gross fee amount received (70% staker share is calculated here).
+     * @dev    FIX VTX-01: The Router already applies STAKING_SHARE_BPS (70%) before
+     *         transferring `amount` here. We must NOT apply any share factor again —
+     *         doing so would cause double-reduction and permanently lock the remainder.
+     *         `amount` is forwarded in full to the reward accumulator.
+     * @param amount The staker portion of the fee (already 70% of gross fee, sent by Router).
      */
     function distributeRevenue(uint256 amount) external onlyRouter {
         if (totalStaked == 0 || amount == 0) return;
 
-        uint256 stakerPortion = (amount * STAKER_SHARE_BPS) / 10_000;
-        rewardPerShareAccumulated += (stakerPortion * PRECISION) / totalStaked;
+        // amount is already the correct staker portion — distribute 100% of it.
+        rewardPerShareAccumulated += (amount * PRECISION) / totalStaked;
 
-        emit RevenueDistributed(stakerPortion);
+        emit RevenueDistributed(amount);
     }
 
     /**

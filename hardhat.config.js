@@ -16,6 +16,7 @@ module.exports = {
         runs: 200,
       },
       viaIR: true,
+      evmVersion: "cancun",
     },
   },
 
@@ -23,6 +24,7 @@ module.exports = {
     // Local development
     hardhat: {
       chainId: 31337,
+      hardfork: "cancun",
     },
     localhost: {
       url: "http://127.0.0.1:8545",

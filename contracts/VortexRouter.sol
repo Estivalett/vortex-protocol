@@ -43,6 +43,14 @@ contract VortexRouter is VortexIntent, ReentrancyGuard, Ownable2Step {
     /// @notice Basis-point denominator.
     uint256 public constant BPS_DENOMINATOR = 10_000;
 
+    /// @notice FIX VTX-06: Minimum input amount to prevent fee evasion via dust amounts.
+    ///         At 5 bps, inputs below 20_000 wei produce a zero fee due to integer division.
+    uint256 public constant MIN_INPUT_AMOUNT = 20_000;
+
+    /// @notice FIX VTX-07: Maximum allowed deadline offset from block.timestamp (7 days).
+    ///         Prevents perpetual intents that lock user funds indefinitely.
+    uint256 public constant MAX_DEADLINE_OFFSET = 7 days;
+
     /// @notice Staking contract receives 70% of collected fees.
     uint256 public constant STAKING_SHARE_BPS = 7_000;
 
@@ -68,6 +76,13 @@ contract VortexRouter is VortexIntent, ReentrancyGuard, Ownable2Step {
     /// @notice Whether the protocol is paused (emergency stop).
     bool public paused;
 
+    /// @notice FIX VTX-02: Cross-chain routing disabled by default.
+    ///         True cross-chain delivery cannot be verified on-chain without a messaging
+    ///         layer (LayerZero, Wormhole, etc.). Until that proof mechanism is integrated,
+    ///         only same-chain intents are permitted (sourceChain == destChain).
+    ///         Owner (governance) can enable cross-chain when proof infrastructure is ready.
+    bool public crossChainEnabled;
+
     // ─────────────────────────────────────────────────────────────────────────
     // Events
     // ─────────────────────────────────────────────────────────────────────────
@@ -76,6 +91,7 @@ contract VortexRouter is VortexIntent, ReentrancyGuard, Ownable2Step {
     event TreasurySet(address indexed treasury);
     event OpsWalletSet(address indexed opsWallet);
     event ProtocolPaused(bool paused);
+    event CrossChainEnabled(bool enabled);
     event FeeDistributed(
         bytes32 indexed intentHash,
         uint256 totalFee,
@@ -164,6 +180,17 @@ contract VortexRouter is VortexIntent, ReentrancyGuard, Ownable2Step {
         emit ProtocolPaused(_paused);
     }
 
+    /**
+     * @notice Enables or disables cross-chain routing (sourceChain != destChain).
+     * @dev    FIX VTX-02: Cross-chain delivery cannot be verified on-chain in the current
+     *         architecture. Enable only after integrating a cross-chain messaging proof layer.
+     * @param _enabled True to allow cross-chain intents, false to restrict to same-chain.
+     */
+    function setCrossChainEnabled(bool _enabled) external onlyOwner {
+        crossChainEnabled = _enabled;
+        emit CrossChainEnabled(_enabled);
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // Core Intent Lifecycle
     // ─────────────────────────────────────────────────────────────────────────
@@ -200,11 +227,18 @@ contract VortexRouter is VortexIntent, ReentrancyGuard, Ownable2Step {
         returns (bytes32 intentHash)
     {
         // ── Checks ───────────────────────────────────────────────────────────
-        require(inputToken  != address(0), "VortexRouter: zero inputToken");
-        require(outputToken != address(0), "VortexRouter: zero outputToken");
-        require(inputAmount  > 0,          "VortexRouter: zero inputAmount");
-        require(minOutput    > 0,          "VortexRouter: zero minOutput");
-        require(deadline > block.timestamp,"VortexRouter: deadline in past");
+        require(inputToken  != address(0),                            "VortexRouter: zero inputToken");
+        require(outputToken != address(0),                            "VortexRouter: zero outputToken");
+        // FIX VTX-06: enforce minimum to prevent dust fee evasion
+        require(inputAmount >= MIN_INPUT_AMOUNT,                      "VortexRouter: inputAmount below minimum");
+        require(minOutput    > 0,                                     "VortexRouter: zero minOutput");
+        // FIX VTX-07: enforce maximum deadline to prevent perpetual intent lock-up
+        require(deadline > block.timestamp,                           "VortexRouter: deadline in past");
+        require(deadline <= block.timestamp + MAX_DEADLINE_OFFSET,    "VortexRouter: deadline too far");
+        // FIX VTX-02: same-chain only until cross-chain proof layer is integrated
+        if (!crossChainEnabled) {
+            require(sourceChain == destChain, "VortexRouter: cross-chain not enabled");
+        }
 
         uint256 currentNonce = nonces[msg.sender];
 

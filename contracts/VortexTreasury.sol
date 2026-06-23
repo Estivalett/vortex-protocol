@@ -92,12 +92,12 @@ contract VortexTreasury is ReentrancyGuard, Ownable2Step {
 
     /**
      * @notice Records that `amount` of `token` has been transferred to this contract.
-     * @dev    Call this after any safeTransfer to the treasury to keep totalReceived accurate.
-     *         Anyone can call; it only updates an accounting counter.
+     * @dev    FIX VTX-04: Restricted to onlyOwner (previously public, allowing anyone to
+     *         inflate the totalReceived counter and emit false TokenReceived events).
      * @param token  ERC-20 token address.
      * @param amount Amount to record.
      */
-    function recordDeposit(address token, uint256 amount) external {
+    function recordDeposit(address token, uint256 amount) external onlyOwner {
         require(token != address(0), "VortexTreasury: use receive() for ETH");
         totalReceived[token] += amount;
         emit TokenReceived(token, msg.sender, amount);
@@ -122,6 +122,13 @@ contract VortexTreasury is ReentrancyGuard, Ownable2Step {
         require(amount > 0,              "VortexTreasury: zero amount");
         require(address(this).balance >= amount, "VortexTreasury: insufficient ETH");
 
+        // FIX VTX-08: keep totalReceived in sync with actual outflows
+        if (totalReceived[address(0)] >= amount) {
+            totalReceived[address(0)] -= amount;
+        } else {
+            totalReceived[address(0)] = 0;
+        }
+
         emit EthWithdrawn(recipient, amount);
 
         (bool ok, ) = recipient.call{value: amount}("");
@@ -143,6 +150,13 @@ contract VortexTreasury is ReentrancyGuard, Ownable2Step {
         require(token     != address(0), "VortexTreasury: zero token");
         require(recipient != address(0), "VortexTreasury: zero recipient");
         require(amount > 0,              "VortexTreasury: zero amount");
+
+        // FIX VTX-08: keep totalReceived in sync with actual outflows
+        if (totalReceived[token] >= amount) {
+            totalReceived[token] -= amount;
+        } else {
+            totalReceived[token] = 0;
+        }
 
         emit TokenWithdrawn(token, recipient, amount);
 
