@@ -6,6 +6,7 @@
 [![Solidity](https://img.shields.io/badge/Solidity-0.8.24-363636.svg?logo=solidity)](https://soliditylang.org/)
 [![OpenZeppelin](https://img.shields.io/badge/OpenZeppelin-5.x-4E5EE4.svg)](https://www.openzeppelin.com/)
 [![Built with Hardhat](https://img.shields.io/badge/Built%20with-Hardhat-FFF100.svg)](https://hardhat.org/)
+[![CI](https://github.com/DeveloperDefi/traverse-protocol/actions/workflows/test.yml/badge.svg)](https://github.com/DeveloperDefi/traverse-protocol/actions/workflows/test.yml)
 [![Status: Testnet](https://img.shields.io/badge/status-testnet-orange.svg)](#-status)
 
 Traverse is a cross-chain liquidity routing protocol with intent-based execution and competitive solver auctions. Users submit signed intents, solvers compete to provide the best execution, and TRV token coordinates the network.
